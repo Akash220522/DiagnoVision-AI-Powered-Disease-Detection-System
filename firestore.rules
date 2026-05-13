@@ -1,0 +1,106 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Global Helpers ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    
+    function isEmailVerified() {
+      return request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+    
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+    
+    function existing() {
+      return resource.data;
+    }
+
+    // --- User Rules ---
+    match /users/{userId} {
+      function isValidUser(data) {
+        return data.uid == request.auth.uid 
+          && data.email is string && data.email.size() <= 256
+          && data.role in ['patient', 'doctor', 'admin']
+          && (data.displayName is string || !('displayName' in data))
+          && data.keys().hasAll(['uid', 'email', 'role']);
+      }
+
+      allow get: if isSignedIn();
+      allow list: if isSignedIn() && (existing().role == 'doctor' || existing().role == 'admin' || isOwner(userId));
+      
+      allow create: if isSignedIn() 
+        && isOwner(userId) 
+        && isValidUser(incoming())
+        && incoming().createdAt == request.time;
+        
+      allow update: if isSignedIn() 
+        && isOwner(userId)
+        && isValidUser(incoming())
+        && incoming().updatedAt == request.time
+        && incoming().role == existing().role; // Role is immutable by user
+    }
+
+    // --- Diagnosis Rules ---
+    match /diagnoses/{diagnosisId} {
+      function isValidDiagnosis(data) {
+        return isValidId(data.patientId)
+          && data.diseaseType is string && data.diseaseType.size() <= 100
+          && data.prediction is string && data.prediction.size() <= 1000
+          && data.confidence is number && data.confidence >= 0 && data.confidence <= 1
+          && (data.severity in ['low', 'moderate', 'high', 'critical'])
+          && data.keys().hasAll(['patientId', 'diseaseType', 'prediction', 'confidence']);
+      }
+
+      allow get: if isSignedIn() && (isOwner(existing().patientId) || get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['doctor', 'admin']);
+      allow list: if isSignedIn() && (isOwner(resource.data.patientId) || get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['doctor', 'admin']);
+      
+      allow create: if isSignedIn() 
+        && (isOwner(incoming().patientId) || get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'doctor')
+        && isValidDiagnosis(incoming())
+        && incoming().createdAt == request.time;
+        
+      allow update: if isSignedIn() 
+        && (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['doctor', 'admin'])
+        && isValidDiagnosis(incoming())
+        && incoming().patientId == existing().patientId;
+    }
+
+    // --- Appointment Rules ---
+    match /appointments/{appointmentId} {
+      function isValidAppointment(data) {
+        return isValidId(data.patientId) && isValidId(data.doctorId)
+          && data.dateTime is string // simplifed for now
+          && data.status in ['scheduled', 'completed', 'cancelled']
+          && data.keys().hasAll(['patientId', 'doctorId', 'dateTime', 'status']);
+      }
+
+      allow get, list: if isSignedIn() && (isOwner(resource.data.patientId) || isOwner(resource.data.doctorId) || get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin');
+      
+      allow create: if isSignedIn() 
+        && (isOwner(incoming().patientId) || isOwner(incoming().doctorId))
+        && isValidAppointment(incoming())
+        && incoming().createdAt == request.time;
+        
+      allow update: if isSignedIn() 
+        && (isOwner(existing().patientId) || isOwner(existing().doctorId))
+        && isValidAppointment(incoming())
+        && (incoming().diff(existing()).affectedKeys().hasOnly(['status', 'dateTime', 'reason']));
+    }
+  }
+}

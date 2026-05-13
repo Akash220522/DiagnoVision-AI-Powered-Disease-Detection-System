@@ -1,0 +1,6 @@
+{
+  "name": "Lumina Health AI",
+  "description": "Futuristic enterprise-level AI Healthcare Ecosystem with multimodal diagnostics, patient management, and AI doctor assistants.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": []
+}
